@@ -4,7 +4,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 8080;
-const DATA_DIR = __dirname;
+const DATA_DIR = process.env.DATA_DIR || __dirname;
 const HISTORY_FILE = DATA_DIR + "/history.json";
 const ACCOUNTS_FILE = DATA_DIR + "/accounts.json";
 const GROUPS_FILE = DATA_DIR + "/groups.json";
