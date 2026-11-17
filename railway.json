@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "deploy": {
+    "volumes": [
+      { "name": "messenger-data", "mountPath": "/data" }
+    ],
+    "env": {
+      "DATA_DIR": "/data"
+    }
+  }
+}
