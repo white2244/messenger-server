@@ -1,9 +1,14 @@
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const fs = require("fs");
+const crypto = require("crypto");
 
 const PORT = process.env.PORT || 8080;
-const HISTORY_FILE = __dirname + "/history.json";
+const DATA_DIR = __dirname;
+const HISTORY_FILE = DATA_DIR + "/history.json";
+const ACCOUNTS_FILE = DATA_DIR + "/accounts.json";
+const GROUPS_FILE = DATA_DIR + "/groups.json";
+const AVATARS_FILE = DATA_DIR + "/avatars.json";
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
@@ -12,31 +17,68 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// name -> ws
+// name -> ws (только онлайн)
 const users = new Map();
+// name -> { id, name, members: [] }
+let groups = {};
+// name -> { salt, hash }
+let accounts = {};
+// name -> "data:image/jpeg;base64,..." (миниатюра)
+let avatars = {};
 
-// { "pairKey": [ { from, text, ts }, ... ] }
-let history = {};
-try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8")); } catch {}
+function loadJson(file, def) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return def; }
+}
+let history = loadJson(HISTORY_FILE, {});
 
-function saveHistory() {
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history)); } catch (e) { console.error(e); }
+function saveJson(file, obj) {
+  try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (e) { console.error(e); }
+}
+const saveHistory = () => saveJson(HISTORY_FILE, history);
+const saveAccounts = () => saveJson(ACCOUNTS_FILE, accounts);
+const saveGroups = () => saveJson(GROUPS_FILE, groups);
+const saveAvatars = () => saveJson(AVATARS_FILE, avatars);
+const MAX_AVATAR = 60 * 1024; // ~60 КБ на аватар
+
+function hashPass(pass, salt) {
+  return crypto.scryptSync(pass, salt, 32).toString("hex");
 }
 
 function pairKey(a, b) { return [a, b].sort().join("|"); }
 
 function sendTo(ws, obj) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function sendToName(name, obj) {
+  sendTo(users.get(name), obj);
+}
+
+function userGroupList(name) {
+  return Object.values(groups).filter(g => g.members.includes(name));
 }
 
 function userHistory(name) {
   const out = {};
   for (const key of Object.keys(history)) {
-    const [a, b] = key.split("|");
-    if (a === name || b === name) out[key] = history[key];
+    if (key.startsWith("g:")) {
+      const g = groups[key.slice(2)];
+      if (g && g.members.includes(name)) out[key] = history[key];
+    } else {
+      const [a, b] = key.split("|");
+      if (a === name || b === name) out[key] = history[key];
+    }
   }
   return out;
 }
+
+function broadcastUsers() {
+  const all = Object.keys(accounts);
+  const online = [...users.keys()];
+  for (const [, c] of users) sendTo(c, { type: "users", users: all, online });
+}
+
+function validName(n) { return /^[a-zA-Z0-9_\u0430-\u044f\u0410-\u042f]{2,20}$/.test(n); }
 
 wss.on("connection", (ws) => {
   let name = null;
@@ -47,82 +89,131 @@ wss.on("connection", (ws) => {
 
     switch (msg.type) {
       case "login": {
-        const base = String(msg.name || "").trim().slice(0, 30);
-        if (!base) {
-          sendTo(ws, { type: "login_failed", reason: "Пустое имя" });
+        const u = String(msg.name || "").trim();
+        const pass = String(msg.pass || "");
+        const register = !!msg.register;
+        if (!validName(u)) {
+          sendTo(ws, { type: "login_failed", reason: "Имя: 2–20 символов, буквы, цифры, _" });
           ws.close();
           return;
         }
-        // Вход под любым именем: если занято — добавляем 2, 3, 4...
-        name = base;
-        let n = 2;
-        while (users.has(name)) name = base + n++;
+        if (pass.length < 4) {
+          sendTo(ws, { type: "login_failed", reason: "Пароль минимум 4 символа" });
+          ws.close();
+          return;
+        }
+        if (register) {
+          if (accounts[u]) {
+            sendTo(ws, { type: "login_failed", reason: "Это имя уже занято" });
+            return;
+          }
+          const salt = crypto.randomBytes(8).toString("hex");
+          accounts[u] = { salt, hash: hashPass(pass, salt) };
+          saveAccounts();
+        } else {
+          const acc = accounts[u];
+          if (!acc) {
+            sendTo(ws, { type: "login_failed", reason: "Пользователь не найден. Зарегистрируйтесь" });
+            ws.close();
+            return;
+          }
+          if (hashPass(pass, acc.salt) !== acc.hash) {
+            sendTo(ws, { type: "login_failed", reason: "Неверный пароль" });
+            ws.close();
+            return;
+          }
+        }
+        // Выкинуть старое соединение этого же имени
+        const old = users.get(u);
+        if (old && old !== ws) { try { old.close(4000, "relogin"); } catch {} }
+        name = u;
         users.set(name, ws);
         sendTo(ws, { type: "login_ok", name });
+        sendTo(ws, { type: "groups", groups: userGroupList(name) });
         sendTo(ws, { type: "history", history: userHistory(name) });
-        const all = [...users.keys()];
-        for (const [n, c] of users) sendTo(c, { type: "users", users: all });
-        console.log("login:", name);
+        sendTo(ws, { type: "avatars", avatars });
+        broadcastUsers();
+        console.log("login:", name, register ? "(registered)" : "");
         break;
       }
       case "get_history": {
-        const key = pairKey(name, msg.with);
+        const with_ = msg.with;
+        const key = String(with_).startsWith("g:") ? with_ : pairKey(name, with_);
         sendTo(ws, { type: "history", history: { [key]: history[key] || [] } });
         break;
       }
+      case "create_group": {
+        const gname = String(msg.name || "").trim().slice(0, 30);
+        const members = [...new Set([name, ...(Array.isArray(msg.members) ? msg.members : [])])]
+          .filter(m => accounts[m]).slice(0, 50);
+        if (!gname || members.length < 1) return;
+        const id = "g" + crypto.randomBytes(4).toString("hex");
+        groups[id] = { id, name: gname, members };
+        saveGroups();
+        const payload = { type: "group", group: groups[id] };
+        for (const m of members) sendToName(m, payload);
+        console.log("group created:", gname, members.join(","));
+        break;
+      }
       case "message": {
-        const to = msg.to;
+        const to = String(msg.to || "");
         const text = String(msg.text || "").slice(0, 2000);
-        const key = pairKey(name, to);
-        if (!history[key]) history[key] = [];
-        history[key].push({ from: name, text, ts: Date.now() });
-        // Не даём истории расти бесконечно: максимум 500 сообщений на чат
-        if (history[key].length > 500) history[key] = history[key].slice(-500);
-        saveHistory();
-        const item = { from: name, text, ts: Date.now() };
-        sendTo(ws, { type: "message", to: to, from: name, text, ts: item.ts, echo: true });
-        const toWs = users.get(to);
-        if (toWs) sendTo(toWs, { type: "message", from: name, text, ts: item.ts });
+        if (!text) return;
+        const ts = Date.now();
+        const item = { from: name, text, ts };
+        if (to.startsWith("g:")) {
+          const g = groups[to.slice(2)];
+          if (!g || !g.members.includes(name)) return;
+          if (!history[to]) history[to] = [];
+          history[to].push(item);
+          if (history[to].length > 500) history[to] = history[to].slice(-500);
+          saveHistory();
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, group: true });
+          for (const m of g.members) if (m !== name) sendToName(m, { type: "message", from: name, to, text, ts, group: true });
+        } else {
+          if (!accounts[to]) return;
+          const key = pairKey(name, to);
+          if (!history[key]) history[key] = [];
+          history[key].push(item);
+          if (history[key].length > 500) history[key] = history[key].slice(-500);
+          saveHistory();
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true });
+          sendToName(to, { type: "message", from: name, text, ts });
+        }
         break;
       }
-      case "call": {
-        const to = users.get(msg.to);
-        if (to) sendTo(to, { type: "call", from: name });
+      case "set_avatar": {
+        const data = String(msg.data || "");
+        if (!data.startsWith("data:image/") || data.length > MAX_AVATAR) {
+          sendTo(ws, { type: "avatar_failed", reason: "Слишком большое изображение" });
+          return;
+        }
+        avatars[name] = data;
+        saveAvatars();
+        for (const [, c] of users) sendTo(c, { type: "avatar", name, data });
+        console.log("avatar set:", name);
         break;
       }
-      case "accept": {
-        const to = users.get(msg.to);
-        if (to) sendTo(to, { type: "accept", from: name });
-        break;
-      }
-      case "decline": {
-        const to = users.get(msg.to);
-        if (to) sendTo(to, { type: "decline", from: name });
-        break;
-      }
-      case "webrtc": {
-        const to = users.get(msg.to);
-        if (to) sendTo(to, { type: "webrtc", from: name, data: msg.data });
-        break;
-      }
-      case "hangup": {
-        const to = users.get(msg.to);
-        if (to) sendTo(to, { type: "hangup", from: name });
-        break;
-      }
+      case "call": { const to = users.get(msg.to); if (to) sendTo(to, { type: "call", from: name }); break; }
+      case "accept": { const to = users.get(msg.to); if (to) sendTo(to, { type: "accept", from: name }); break; }
+      case "decline": { const to = users.get(msg.to); if (to) sendTo(to, { type: "decline", from: name }); break; }
+      case "webrtc": { const to = users.get(msg.to); if (to) sendTo(to, { type: "webrtc", from: name, data: msg.data }); break; }
+      case "hangup": { const to = users.get(msg.to); if (to) sendTo(to, { type: "hangup", from: name }); break; }
     }
   });
 
   ws.on("close", () => {
     if (name && users.get(name) === ws) {
       users.delete(name);
-      const all = [...users.keys()];
-      for (const [n, c] of users) sendTo(c, { type: "users", users: all });
+      broadcastUsers();
       console.log("left:", name);
     }
   });
 });
 
 server.listen(PORT, () => {
+  accounts = loadJson(ACCOUNTS_FILE, {});
+  groups = loadJson(GROUPS_FILE, {});
+  avatars = loadJson(AVATARS_FILE, {});
   console.log("Server on port " + PORT);
 });
