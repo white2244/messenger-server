@@ -142,6 +142,11 @@ wss.on("connection", (ws) => {
         sendTo(ws, { type: "history", history: { [key]: history[key] || [] } });
         break;
       }
+      case "find_user": {
+        const u = String(msg.name || "").trim();
+        sendTo(ws, { type: "user_found", name: u, exists: !!accounts[u] });
+        break;
+      }
       case "create_group": {
         const gname = String(msg.name || "").trim().slice(0, 30);
         const members = [...new Set([name, ...(Array.isArray(msg.members) ? msg.members : [])])]
