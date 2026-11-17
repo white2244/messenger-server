@@ -158,28 +158,51 @@ wss.on("connection", (ws) => {
       case "message": {
         const to = String(msg.to || "");
         const text = String(msg.text || "").slice(0, 2000);
-        if (!text) return;
+        const MAX_FILE = 1200 * 1024;
+        let file = null;
+        if (typeof msg.file === "string" && msg.file.startsWith("data:") && msg.file.length <= MAX_FILE) file = msg.file;
+        const fname = String(msg.fname || "").slice(0, 100);
+        if (!text && !file) return;
         const ts = Date.now();
         const item = { from: name, text, ts };
+        if (file) { item.file = file; if (fname) item.fname = fname; }
         if (to.startsWith("g:")) {
           const g = groups[to.slice(2)];
           if (!g || !g.members.includes(name)) return;
           if (!history[to]) history[to] = [];
           history[to].push(item);
-          if (history[to].length > 500) history[to] = history[to].slice(-500);
+          if (history[to].length > 300) history[to] = history[to].slice(-300);
           saveHistory();
-          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, group: true });
-          for (const m of g.members) if (m !== name) sendToName(m, { type: "message", from: name, to, text, ts, group: true });
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, group: true, file, fname });
+          for (const m of g.members) if (m !== name) sendToName(m, { type: "message", from: name, to, text, ts, group: true, file, fname });
         } else {
           if (!accounts[to]) return;
           const key = pairKey(name, to);
           if (!history[key]) history[key] = [];
           history[key].push(item);
-          if (history[key].length > 500) history[key] = history[key].slice(-500);
+          if (history[key].length > 300) history[key] = history[key].slice(-300);
           saveHistory();
-          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true });
-          sendToName(to, { type: "message", from: name, text, ts });
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, file, fname });
+          sendToName(to, { type: "message", from: name, text, ts, file, fname });
         }
+        break;
+      }
+      case "delete_chat": {
+        const to = String(msg.to || "");
+        let key, peers;
+        if (to.startsWith("g:")) {
+          const g = groups[to.slice(2)];
+          if (!g || !g.members.includes(name)) return;
+          key = to; peers = g.members.filter(m => m !== name);
+        } else {
+          if (!accounts[to]) return;
+          key = pairKey(name, to); peers = [to];
+        }
+        delete history[key];
+        saveHistory();
+        sendTo(ws, { type: "chat_deleted", key });
+        for (const p of peers) sendToName(p, { type: "chat_deleted", key });
+        console.log("chat deleted:", key);
         break;
       }
       case "set_avatar": {
