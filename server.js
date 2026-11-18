@@ -226,6 +226,33 @@ wss.on("connection", (ws) => {
         console.log("group deleted:", g.name);
         break;
       }
+      case "react": {
+        const to = String(msg.to || "");
+        const ts = Number(msg.ts);
+        const emoji = String(msg.emoji || "").slice(0, 8);
+        const key = to.startsWith("g:") ? to : pairKey(name, to);
+        const arr = history[key];
+        if (!arr) return;
+        const it = arr.find(m => m.ts === ts);
+        if (!it) return;
+        it.reactions = it.reactions || {};
+        const list = it.reactions[emoji] || [];
+        const i = list.indexOf(name);
+        if (i >= 0) list.splice(i, 1); else list.push(name);
+        if (list.length) it.reactions[emoji] = list; else delete it.reactions[emoji];
+        if (!Object.keys(it.reactions).length) delete it.reactions;
+        saveHistory();
+        const payload = { type: "reactions", key, ts, reactions: it.reactions || {} };
+        if (key.startsWith("g:")) {
+          const g = groups[key.slice(2)];
+          if (g) for (const m of g.members) sendToName(m, payload);
+        } else {
+          const [a, b] = key.split("|");
+          sendToName(a, payload);
+          sendToName(b, payload);
+        }
+        break;
+      }
       case "set_avatar": {
         const data = String(msg.data || "");
         if (!data.startsWith("data:image/") || data.length > MAX_AVATAR) {
