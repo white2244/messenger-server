@@ -253,6 +253,51 @@ wss.on("connection", (ws) => {
         }
         break;
       }
+      case "typing": {
+        const to = String(msg.to || "");
+        const note = { type: "typing", from: name };
+        if (to.startsWith("g:")) {
+          const g = groups[to.slice(2)];
+          if (g && g.members.includes(name)) for (const m of g.members) if (m !== name) sendToName(m, note);
+        } else sendToName(to, note);
+        break;
+      }
+      case "del_msg": {
+        const to = String(msg.to || "");
+        const ts = Number(msg.ts);
+        const key = to.startsWith("g:") ? to : pairKey(name, to);
+        const arr = history[key];
+        if (!arr) return;
+        const it = arr.find(m => m.ts === ts);
+        if (!it || it.from !== name) return;
+        history[key] = arr.filter(m => m.ts !== ts);
+        saveHistory();
+        const payload = { type: "msg_deleted", key, ts };
+        if (key.startsWith("g:")) {
+          const g = groups[key.slice(2)];
+          if (g) for (const m of g.members) sendToName(m, payload);
+        } else { const [a, b] = key.split("|"); sendToName(a, payload); sendToName(b, payload); }
+        break;
+      }
+      case "edit_msg": {
+        const to = String(msg.to || "");
+        const ts = Number(msg.ts);
+        const text = String(msg.text || "").slice(0, 2000);
+        const key = to.startsWith("g:") ? to : pairKey(name, to);
+        const arr = history[key];
+        if (!arr) return;
+        const it = arr.find(m => m.ts === ts);
+        if (!it || it.from !== name || it.file) return;
+        it.text = text;
+        it.edited = true;
+        saveHistory();
+        const payload = { type: "msg_edited", key, ts, text };
+        if (key.startsWith("g:")) {
+          const g = groups[key.slice(2)];
+          if (g) for (const m of g.members) sendToName(m, payload);
+        } else { const [a, b] = key.split("|"); sendToName(a, payload); sendToName(b, payload); }
+        break;
+      }
       case "set_avatar": {
         const data = String(msg.data || "");
         if (!data.startsWith("data:image/") || data.length > MAX_AVATAR) {
