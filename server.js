@@ -167,9 +167,11 @@ wss.on("connection", (ws) => {
         let file = null;
         if (typeof msg.file === "string" && msg.file.startsWith("data:") && msg.file.length <= MAX_FILE) file = msg.file;
         const fname = String(msg.fname || "").slice(0, 100);
+        const reply = String(msg.reply || "").slice(0, 200);
         if (!text && !file) return;
         const ts = Date.now();
         const item = { from: name, text, ts };
+        if (reply) item.reply = reply;
         if (file) { item.file = file; if (fname) item.fname = fname; }
         if (to.startsWith("g:")) {
           const g = groups[to.slice(2)];
@@ -178,8 +180,8 @@ wss.on("connection", (ws) => {
           history[to].push(item);
           if (history[to].length > 300) history[to] = history[to].slice(-300);
           saveHistory();
-          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, group: true, file, fname });
-          for (const m of g.members) if (m !== name) sendToName(m, { type: "message", from: name, to, text, ts, group: true, file, fname });
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, group: true, file, fname, reply });
+          for (const m of g.members) if (m !== name) sendToName(m, { type: "message", from: name, to, text, ts, group: true, file, fname, reply });
         } else {
           if (!accounts[to]) return;
           const key = pairKey(name, to);
@@ -187,8 +189,8 @@ wss.on("connection", (ws) => {
           history[key].push(item);
           if (history[key].length > 300) history[key] = history[key].slice(-300);
           saveHistory();
-          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, file, fname });
-          sendToName(to, { type: "message", from: name, text, ts, file, fname });
+          sendTo(ws, { type: "message", from: name, to, text, ts, echo: true, file, fname, reply });
+          sendToName(to, { type: "message", from: name, text, ts, file, fname, reply });
         }
         break;
       }
