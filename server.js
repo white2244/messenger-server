@@ -210,6 +210,20 @@ wss.on("connection", (ws) => {
         console.log("chat deleted:", key);
         break;
       }
+      case "delete_group": {
+        const gid = String(msg.id || "");
+        const g = groups[gid];
+        if (!g || !g.members.includes(name)) return;
+        const key = "g:" + gid;
+        delete groups[gid];
+        delete history[key];
+        saveGroups();
+        saveHistory();
+        const note = { type: "group_deleted", key };
+        for (const m of g.members) sendToName(m, note);
+        console.log("group deleted:", g.name);
+        break;
+      }
       case "set_avatar": {
         const data = String(msg.data || "");
         if (!data.startsWith("data:image/") || data.length > MAX_AVATAR) {
