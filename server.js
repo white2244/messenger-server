@@ -256,6 +256,7 @@ wss.on("connection", (ws) => {
       case "typing": {
         const to = String(msg.to || "");
         const note = { type: "typing", from: name };
+        if (to.startsWith("g:")) note.to = to;
         if (to.startsWith("g:")) {
           const g = groups[to.slice(2)];
           if (g && g.members.includes(name)) for (const m of g.members) if (m !== name) sendToName(m, note);
